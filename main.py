@@ -50,6 +50,7 @@ def get_spreadsheet_clients():
     try:
         idx_id       = next(i for i, h in enumerate(headers) if "provider id" in h.lower())
         idx_contract = next(i for i, h in enumerate(headers) if "pacientes em contrato" in h.lower())
+        idx_name     = next(i for i, h in enumerate(headers) if h.lower() == "cliente")
     except StopIteration:
         raise RuntimeError(f"Colunas não encontradas. Cabeçalhos: {headers}")
 
@@ -57,22 +58,29 @@ def get_spreadsheet_clients():
     for row in rows:
         raw_id       = str(row[idx_id]).strip()       if idx_id < len(row)       else ""
         raw_contract = str(row[idx_contract]).strip() if idx_contract < len(row) else ""
+        raw_name     = str(row[idx_name]).strip()     if idx_name < len(row)     else ""
+
         if not raw_id or not raw_contract:
             continue
+
         try:
             contracted = int(float(raw_contract.replace(".", "").replace(",", ".")))
             if contracted <= 0:
                 continue
-            clients.append({"provider_id": raw_id, "contracted_lives": contracted})
+            clients.append({
+                "provider_id":      raw_id,
+                "contracted_lives": contracted,
+                "name":             raw_name,
+            })
         except (ValueError, TypeError):
             print(f"⚠️  Linha ignorada — provider={raw_id}, contrato={raw_contract}")
+
     return clients
 
 def metabase_headers():
     return {"Content-Type": "application/json", "x-api-key": METABASE_API_KEY}
 
 def fetch_async_result(job_id, max_retries=10, wait=2):
-    """Busca o resultado de uma query assíncrona do Metabase."""
     for attempt in range(max_retries):
         resp = requests.get(
             f"{METABASE_URL}/api/async/{job_id}",
@@ -112,7 +120,6 @@ def query_active_patients(provider_id, start_date):
 
     resp = requests.post(url, headers=metabase_headers(), json=payload, timeout=60)
 
-    # 202 = query assíncrona — buscar resultado pelo job_id
     if resp.status_code == 202:
         result = resp.json()
         job_id = result.get("id")
@@ -122,7 +129,6 @@ def query_active_patients(provider_id, start_date):
             if not result:
                 return None
         else:
-            # 202 mas já veio com dados inline
             result = resp.json()
     elif resp.status_code == 200:
         result = resp.json()
@@ -136,28 +142,19 @@ def query_active_patients(provider_id, start_date):
     if not rows or not cols:
         return None
 
-    # Descobre índices das colunas
     col_names = [c.get("name", "").lower() for c in cols]
-    print(f"   ↳ Colunas: {col_names}")
-
-    # Coluna de data (primeiro campo)
-    date_idx = next((i for i, n in enumerate(col_names) if "date" in n or "month" in n or "mes" in n), 0)
-    # Coluna active_patients (segundo campo — pacientes ativos no mês)
+    date_idx   = next((i for i, n in enumerate(col_names) if "date" in n or "month" in n or "mes" in n), 0)
     active_idx = next((i for i, n in enumerate(col_names) if "active" in n), 1)
 
-    # Filtra a linha do mês atual
-    target_month = start_date[:7]  # "2026-05"
+    target_month = start_date[:7]
     for row in rows:
-        row_date = str(row[date_idx])[:7]  # pega "2026-05" da data
+        row_date = str(row[date_idx])[:7]
         if row_date == target_month:
             try:
-                val = int(float(str(row[active_idx]).replace(",", ".")))
-                print(f"   ↳ Mês {target_month} encontrado: active_patients={val}")
-                return val
+                return int(float(str(row[active_idx]).replace(",", ".")))
             except (ValueError, TypeError):
                 return None
 
-    # Se não achou o mês atual, pega a última linha disponível
     print(f"   ↳ Mês {target_month} não encontrado, usando última linha disponível")
     try:
         return int(float(str(rows[-1][active_idx]).replace(",", ".")))
@@ -176,7 +173,7 @@ def build_message(alerts, start_date):
     for a in sorted(alerts, key=lambda x: -x["pct"]):
         emoji = ":red_circle:" if a["pct"] >= 100 else ":large_yellow_circle:"
         lines.append(
-            f"{emoji} *Provider {a['provider_id']}* — {a['pct']}% "
+            f"{emoji} *{a['name']}* (Provider {a['provider_id']}) — {a['pct']}% "
             f"({fmt(a['active_patients'])} de {fmt(a['contracted_lives'])} vidas)"
         )
     return header + "\n".join(lines)
@@ -197,7 +194,8 @@ def main():
     for client in clients:
         pid        = client["provider_id"]
         contracted = client["contracted_lives"]
-        print(f"   Provider {pid} (contrato: {contracted})...")
+        name       = client["name"]
+        print(f"   {name} — Provider {pid} (contrato: {contracted})...")
         active = query_active_patients(pid, start_date)
         if active is None:
             print(f"   ↳ Sem dados, pulando.")
@@ -210,6 +208,7 @@ def main():
                 "active_patients":  active,
                 "contracted_lives": contracted,
                 "pct":              pct,
+                "name":             name,
             })
 
     print(f"\n🚨 {len(alerts)} cliente(s) acima de {THRESHOLD}%.")
