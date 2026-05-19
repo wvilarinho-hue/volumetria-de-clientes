@@ -36,14 +36,28 @@ def get_spreadsheet_clients():
     )
     gc = gspread.authorize(creds)
     sheet = gc.open_by_key(SPREADSHEET_ID).sheet1
-    records = sheet.get_all_records()
+
+    all_values = sheet.get_all_values()
+    if not all_values:
+        return []
+
+    headers = all_values[0]
+    rows    = all_values[1:]
+
+    try:
+        idx_id       = next(i for i, h in enumerate(headers) if "provider id" in h.lower())
+        idx_contract = next(i for i, h in enumerate(headers) if "pacientes em contrato" in h.lower())
+    except StopIteration:
+        raise RuntimeError(f"Colunas não encontradas. Cabeçalhos disponíveis: {headers}")
 
     clients = []
-    for row in records:
-        raw_id       = str(row.get("Provider ID", "")).strip()
-        raw_contract = str(row.get("Número de pacientes em contrato", "")).strip()
+    for row in rows:
+        raw_id       = str(row[idx_id]).strip()       if idx_id < len(row)       else ""
+        raw_contract = str(row[idx_contract]).strip() if idx_contract < len(row) else ""
+
         if not raw_id or not raw_contract:
             continue
+
         try:
             contracted = int(float(raw_contract.replace(".", "").replace(",", ".")))
             if contracted <= 0:
@@ -51,6 +65,7 @@ def get_spreadsheet_clients():
             clients.append({"provider_id": raw_id, "contracted_lives": contracted})
         except (ValueError, TypeError):
             print(f"⚠️  Linha ignorada — provider={raw_id}, contrato={raw_contract}")
+
     return clients
 
 def metabase_headers():
@@ -78,9 +93,9 @@ def query_active_patients(card_id, provider_id, start_date):
     if resp.status_code != 200:
         print(f"⚠️  Metabase {resp.status_code} para provider {provider_id}")
         return None
-    result = resp.json()
-    rows = result.get("data", {}).get("rows", [])
-    cols = result.get("data", {}).get("cols", [])
+    result    = resp.json()
+    rows      = result.get("data", {}).get("rows", [])
+    cols      = result.get("data", {}).get("cols", [])
     if not rows or not cols:
         return None
     col_index = next((i for i, c in enumerate(cols) if "active_patients" in c.get("name","").lower()), None)
@@ -95,14 +110,17 @@ def fmt(n):
     return f"{n:,}".replace(",", ".")
 
 def build_message(alerts, start_date):
-    month = get_month_label(start_date)
+    month  = get_month_label(start_date)
     header = f":bar_chart: *Volumetria de Clientes — {month}*\nClientes que atingiram *90% ou mais* do contrato de vidas:\n\n"
     if not alerts:
         return header + "✅ Nenhum cliente atingiu o limiar de 90% este mês."
     lines = []
     for a in sorted(alerts, key=lambda x: -x["pct"]):
         emoji = ":red_circle:" if a["pct"] >= 100 else ":large_yellow_circle:"
-        lines.append(f"{emoji} *Provider {a['provider_id']}* — {a['pct']}% ({fmt(a['active_patients'])} de {fmt(a['contracted_lives'])} vidas)")
+        lines.append(
+            f"{emoji} *Provider {a['provider_id']}* — {a['pct']}% "
+            f"({fmt(a['active_patients'])} de {fmt(a['contracted_lives'])} vidas)"
+        )
     return header + "\n".join(lines)
 
 def send_to_slack(message):
@@ -135,7 +153,12 @@ def main():
         pct = round((active / contracted) * 100, 1)
         print(f"   ↳ {active}/{contracted} = {pct}%")
         if pct >= THRESHOLD:
-            alerts.append({"provider_id": pid, "active_patients": active, "contracted_lives": contracted, "pct": pct})
+            alerts.append({
+                "provider_id":      pid,
+                "active_patients":  active,
+                "contracted_lives": contracted,
+                "pct":              pct,
+            })
 
     print(f"\n🚨 {len(alerts)} cliente(s) acima de {THRESHOLD}%.")
     print("📤 Enviando para o Slack...")
