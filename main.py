@@ -82,7 +82,7 @@ def query_active_patients(provider_id, start_date):
                 "id":     PROVIDER_PARAM_ID,
                 "type":   "id",
                 "target": ["dimension", ["template-tag", "provider_id"]],
-                "value":  [int(provider_id)]
+                "value":  [str(provider_id)]
             },
             {
                 "id":     START_DATE_PARAM_ID,
