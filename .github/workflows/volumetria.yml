@@ -34,4 +34,4 @@ jobs:
           METABASE_URL:                ${{ secrets.METABASE_URL }}
           METABASE_API_KEY:            ${{ secrets.METABASE_API_KEY }}
           SLACK_WEBHOOK_URL:           ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python main.py
+        run: python debug.py
