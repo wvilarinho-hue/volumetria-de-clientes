@@ -2,8 +2,8 @@ name: Volumetria de Clientes
 
 on:
   schedule:
-    - cron: "0 11 * * 1"  # toda segunda às 08h Brasília
-  workflow_dispatch:       # permite rodar manualmente
+    - cron: "0 11 * * 1"
+  workflow_dispatch:
 
 jobs:
   run:
@@ -11,6 +11,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Verificar arquivo
+        run: |
+          echo "=== Conteúdo do main.py (linhas 35-45) ==="
+          sed -n '35,45p' main.py
 
       - name: Setup Python
         uses: actions/setup-python@v5
