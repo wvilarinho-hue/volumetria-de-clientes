@@ -13,7 +13,10 @@ METABASE_URL      = os.environ["METABASE_URL"].rstrip("/")
 METABASE_API_KEY  = os.environ["METABASE_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 DASHBOARD_ID      = 238
-CARD_NAME_KEYWORD = "taxa de atividade"
+DASHCARD_ID       = 24154
+CARD_ID           = 9263
+PROVIDER_PARAM_ID = "b46cc8b5"
+START_DATE_PARAM_ID = "1c0cfe6c"
 THRESHOLD         = 90.0
 
 def get_start_date():
@@ -48,7 +51,7 @@ def get_spreadsheet_clients():
         idx_id       = next(i for i, h in enumerate(headers) if "provider id" in h.lower())
         idx_contract = next(i for i, h in enumerate(headers) if "pacientes em contrato" in h.lower())
     except StopIteration:
-        raise RuntimeError(f"Colunas não encontradas. Cabeçalhos disponíveis: {headers}")
+        raise RuntimeError(f"Colunas não encontradas. Cabeçalhos: {headers}")
 
     clients = []
     for row in rows:
@@ -71,36 +74,48 @@ def get_spreadsheet_clients():
 def metabase_headers():
     return {"Content-Type": "application/json", "x-api-key": METABASE_API_KEY}
 
-def find_card_id(dashboard_id, keyword):
-    url  = f"{METABASE_URL}/api/dashboard/{dashboard_id}"
-    resp = requests.get(url, headers=metabase_headers(), timeout=30)
-    resp.raise_for_status()
-    for dashcard in resp.json().get("dashcards", []):
-        card = dashcard.get("card", {})
-        if keyword.lower() in card.get("name", "").lower():
-            return card["id"]
-    return None
-
-def query_active_patients(card_id, provider_id, start_date):
-    url = f"{METABASE_URL}/api/card/{card_id}/query"
+def query_active_patients(provider_id, start_date):
+    url = f"{METABASE_URL}/api/dashboard/{DASHBOARD_ID}/dashcard/{DASHCARD_ID}/card/{CARD_ID}/query"
     payload = {
         "parameters": [
-            {"type": "category",    "target": ["variable", ["template-tag", "provider_id"]], "value": provider_id},
-            {"type": "date/single", "target": ["variable", ["template-tag", "start_date"]],  "value": start_date}
+            {
+                "id":     PROVIDER_PARAM_ID,
+                "type":   "id",
+                "target": ["dimension", ["template-tag", "provider_id"]],
+                "value":  [int(provider_id)]
+            },
+            {
+                "id":     START_DATE_PARAM_ID,
+                "type":   "date/single",
+                "target": ["variable", ["template-tag", "start_date"]],
+                "value":  start_date
+            }
         ]
     }
+
     resp = requests.post(url, headers=metabase_headers(), json=payload, timeout=60)
     if resp.status_code != 200:
-        print(f"⚠️  Metabase {resp.status_code} para provider {provider_id}")
+        print(f"   ⚠️  Metabase {resp.status_code} para provider {provider_id}: {resp.text[:200]}")
         return None
-    result    = resp.json()
-    rows      = result.get("data", {}).get("rows", [])
-    cols      = result.get("data", {}).get("cols", [])
+
+    result = resp.json()
+    rows   = result.get("data", {}).get("rows", [])
+    cols   = result.get("data", {}).get("cols", [])
+
+    print(f"   DEBUG colunas: {[c.get('name') for c in cols]}")
+    print(f"   DEBUG rows: {rows[:2]}")
+
     if not rows or not cols:
         return None
-    col_index = next((i for i, c in enumerate(cols) if "active_patients" in c.get("name","").lower()), None)
+
+    col_index = next(
+        (i for i, c in enumerate(cols) if "active_patients" in c.get("name","").lower()),
+        None
+    )
     if col_index is None:
+        print(f"   ⚠️  Coluna 'active_patients' não encontrada. Colunas disponíveis: {[c.get('name') for c in cols]}")
         return None
+
     try:
         return int(float(str(rows[0][col_index]).replace(",",".")))
     except (ValueError, IndexError):
@@ -135,18 +150,12 @@ def main():
     clients = get_spreadsheet_clients()
     print(f"   {len(clients)} clientes encontrados.")
 
-    print("🔍 Buscando card no Metabase...")
-    card_id = find_card_id(DASHBOARD_ID, CARD_NAME_KEYWORD)
-    if not card_id:
-        raise RuntimeError(f"Card '{CARD_NAME_KEYWORD}' não encontrado no dashboard {DASHBOARD_ID}.")
-    print(f"   Card ID: {card_id}")
-
     alerts = []
     for client in clients:
         pid        = client["provider_id"]
         contracted = client["contracted_lives"]
-        print(f"   Provider {pid}...")
-        active = query_active_patients(card_id, pid, start_date)
+        print(f"   Provider {pid} (contrato: {contracted})...")
+        active = query_active_patients(pid, start_date)
         if active is None:
             print(f"   ↳ Sem dados, pulando.")
             continue
