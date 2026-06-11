@@ -263,13 +263,26 @@ def find_client_folder(service, parent_id, client_name):
         q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
         fields="files(id, name)"
     ).execute()
-    for f in result.get("files", []):
-        if f["name"].lower().strip() == client_name.lower().strip():
+    folders = result.get("files", [])
+    name_lower = client_name.lower().strip()
+
+    # 1. Match exato
+    for f in folders:
+        if f["name"].lower().strip() == name_lower:
             return f["id"]
-    # Busca parcial se não encontrar exato
-    for f in result.get("files", []):
-        if client_name.lower() in f["name"].lower():
+
+    # 2. Nome da planilha contém o nome da pasta (ex: "Life" → "Life Saúde")
+    for f in folders:
+        if name_lower in f["name"].lower():
             return f["id"]
+
+    # 3. Nome da pasta contém alguma palavra do nome da planilha (ex: "florence" ← "Programa Vivaz (Florence)")
+    words = [w for w in name_lower.split() if len(w) > 3]
+    for f in folders:
+        folder_lower = f["name"].lower()
+        if any(w in folder_lower for w in words):
+            return f["id"]
+
     return None
 
 def get_latest_contract(service, folder_id):
