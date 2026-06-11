@@ -29,6 +29,13 @@ START_DATE_PARAM_ID = "1c0cfe6c"
 THRESHOLD           = 90.0
 DRIVE_FOLDER_ID     = "1A0gNawgeF3JQfLllTiZFXyT6U-drFz1K"
 
+# Mapeamento fixo para clientes cujo nome na planilha não bate com o nome da pasta no Drive
+DRIVE_FOLDER_OVERRIDES = {
+    "hospital da baleia":        "1dKpxeeLvFQDbOKChMdYm8aRmscPdI_61",
+    "programa vivaz (florence)": "1HhihGSSyuVb7pYECSnS4SL_AxFfJITyf",
+    "life":                      "1SSNZj0o-9eY8fQzeviFm7Sp-KOgE3enA",
+}
+
 CSM_MENTIONS = {
     "weslley vilarinho":  "<@U098G010EJV>",
     "caroline mendes":    "<@U0894RSCLTB>",
@@ -505,7 +512,9 @@ def main():
         next_tier   = None
         drive_error = False
         print(f"   ↳ Buscando contrato no Drive...")
-        client_folder = find_client_folder(drive_service, contas_folder_id, name)
+        # Verifica override fixo primeiro
+        override_id   = DRIVE_FOLDER_OVERRIDES.get(name.lower().strip())
+        client_folder = override_id if override_id else find_client_folder(drive_service, contas_folder_id, name)
         if not client_folder:
             print(f"   ↳ Pasta não encontrada no Drive.")
             drive_error = True
