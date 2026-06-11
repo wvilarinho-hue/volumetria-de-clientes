@@ -30,8 +30,8 @@ THRESHOLD           = 90.0
 DRIVE_FOLDER_ID     = "1A0gNawgeF3JQfLllTiZFXyT6U-drFz1K"
 
 CSM_MENTIONS = {
-    "weslley vilarinho":  "@Weslley Vilarinho",
-    "caroline mendes":    "@Caroline Mendes de Moraes",
+    "weslley vilarinho":  "<@U098G010EJV>",
+    "caroline mendes":    "<@U0894RSCLTB>",
 }
 
 slack = WebClient(token=SLACK_BOT_TOKEN)
