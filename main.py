@@ -20,7 +20,7 @@ SPREADSHEET_ID      = "1R2wdIX4AHQ5xtnl6CbiQlC83v4c-UAi2GwB0z5RYofQ"
 METABASE_URL        = os.environ["METABASE_URL"].rstrip("/")
 METABASE_API_KEY    = os.environ["METABASE_API_KEY"]
 SLACK_BOT_TOKEN     = os.environ["SLACK_BOT_TOKEN"]
-SLACK_CHANNEL       = "volumetria-de-clientes"
+SLACK_CHANNEL_ID    = "C0B44KY9NGZ"
 DASHBOARD_ID        = 238
 DASHCARD_ID         = 24154
 CARD_ID             = 9263
@@ -120,7 +120,7 @@ def get_previous_thread_replies():
     """
     replies_by_client = {}
     try:
-        result = slack.conversations_history(channel=get_channel_id(), limit=50)
+        result = slack.conversations_history(channel=SLACK_CHANNEL_ID, limit=50)
         messages = result.get("messages", [])
 
         # Encontra a última mensagem principal do bot com "Volumetria de Clientes"
@@ -133,7 +133,7 @@ def get_previous_thread_replies():
             return replies_by_client
 
         thread_ts = main_msg.get("ts")
-        thread = slack.conversations_replies(channel=get_channel_id(), ts=thread_ts)
+        thread = slack.conversations_replies(channel=SLACK_CHANNEL_ID, ts=thread_ts)
         thread_msgs = thread.get("messages", [])
 
         bot_id = slack.auth_test()["user_id"]
@@ -149,7 +149,7 @@ def get_previous_thread_replies():
 
                 # Busca respostas humanas no subthread desta mensagem
                 sub_ts = msg.get("ts")
-                sub = slack.conversations_replies(channel=get_channel_id(), ts=sub_ts)
+                sub = slack.conversations_replies(channel=SLACK_CHANNEL_ID, ts=sub_ts)
                 for reply in sub.get("messages", [])[1:]:
                     if reply.get("user") != bot_id:
                         author = reply.get("username") or reply.get("user", "CSM")
@@ -160,14 +160,6 @@ def get_previous_thread_replies():
         print(f"⚠️  Erro ao buscar threads anteriores: {e}")
 
     return replies_by_client
-
-def get_channel_id():
-    """Busca o ID do canal pelo nome."""
-    result = slack.conversations_list(types="private_channel,public_channel", limit=200)
-    for ch in result.get("channels", []):
-        if ch.get("name") == SLACK_CHANNEL:
-            return ch["id"]
-    raise RuntimeError(f"Canal #{SLACK_CHANNEL} não encontrado.")
 
 # ── Metabase ──────────────────────────────────────────────────────────────────
 
@@ -374,7 +366,7 @@ def get_csm_mention(csm_name):
     return CSM_MENTIONS.get(csm_name.lower().strip(), f"@{csm_name}")
 
 def post_main_message(text):
-    result = slack.chat_postMessage(channel=get_channel_id(), text=text, mrkdwn=True)
+    result = slack.chat_postMessage(channel=SLACK_CHANNEL_ID, text=text, mrkdwn=True)
     return result["ts"]
 
 def post_thread_reply(channel_id, thread_ts, text):
@@ -465,7 +457,7 @@ def main():
     print(f"   {len(clients)} clientes encontrados.")
 
     print("\n💬 Buscando respostas do thread anterior no Slack...")
-    channel_id       = get_channel_id()
+    channel_id       = SLACK_CHANNEL_ID
     previous_replies = get_previous_thread_replies()
     print(f"   {len(previous_replies)} resposta(s) encontrada(s).")
 
