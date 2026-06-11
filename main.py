@@ -1,42 +1,73 @@
 import os
+import io
 import json
 import time
 import requests
-from datetime import date
+from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import pdfplumber
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 load_dotenv()
 
 SPREADSHEET_ID      = "1R2wdIX4AHQ5xtnl6CbiQlC83v4c-UAi2GwB0z5RYofQ"
 METABASE_URL        = os.environ["METABASE_URL"].rstrip("/")
 METABASE_API_KEY    = os.environ["METABASE_API_KEY"]
-SLACK_WEBHOOK_URL   = os.environ["SLACK_WEBHOOK_URL"]
+SLACK_BOT_TOKEN     = os.environ["SLACK_BOT_TOKEN"]
+SLACK_CHANNEL       = "volumetria-de-clientes"
 DASHBOARD_ID        = 238
 DASHCARD_ID         = 24154
 CARD_ID             = 9263
 PROVIDER_PARAM_ID   = "b46cc8b5"
 START_DATE_PARAM_ID = "1c0cfe6c"
 THRESHOLD           = 90.0
+DRIVE_FOLDER_NAME   = "Contas a Receber"
 
-def get_start_date():
-    return date.today().replace(day=1).isoformat()
+CSM_MENTIONS = {
+    "weslley vilarinho":  "@Weslley Vilarinho",
+    "caroline mendes":    "@Caroline Mendes de Moraes",
+}
 
-def get_month_label(start_date):
+slack = WebClient(token=SLACK_BOT_TOKEN)
+
+# ── Datas ─────────────────────────────────────────────────────────────────────
+
+def get_months(n=3):
+    """Retorna os primeiros dias dos últimos n meses."""
+    today = date.today()
+    return [
+        (today - relativedelta(months=i)).replace(day=1).isoformat()
+        for i in range(n - 1, -1, -1)
+    ]
+
+def get_month_label(iso_date):
     meses = {
         1:"janeiro",2:"fevereiro",3:"março",4:"abril",
         5:"maio",6:"junho",7:"julho",8:"agosto",
         9:"setembro",10:"outubro",11:"novembro",12:"dezembro"
     }
-    d = date.fromisoformat(start_date)
+    d = date.fromisoformat(iso_date)
     return f"{meses[d.month]}/{d.year}"
+
+def fmt(n):
+    return f"{n:,}".replace(",", ".")
+
+# ── Planilha ──────────────────────────────────────────────────────────────────
 
 def get_spreadsheet_clients():
     sa_json = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = Credentials.from_service_account_info(
         sa_json,
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
     )
     gc = gspread.authorize(creds)
     sheet = gc.open_by_key(SPREADSHEET_ID).sheet1
@@ -51,6 +82,7 @@ def get_spreadsheet_clients():
         idx_id       = next(i for i, h in enumerate(headers) if "provider id" in h.lower())
         idx_contract = next(i for i, h in enumerate(headers) if "pacientes em contrato" in h.lower())
         idx_name     = next(i for i, h in enumerate(headers) if h.lower() == "cliente")
+        idx_csm      = next(i for i, h in enumerate(headers) if h.lower() == "csm")
     except StopIteration:
         raise RuntimeError(f"Colunas não encontradas. Cabeçalhos: {headers}")
 
@@ -59,8 +91,9 @@ def get_spreadsheet_clients():
         raw_id       = str(row[idx_id]).strip()       if idx_id < len(row)       else ""
         raw_contract = str(row[idx_contract]).strip() if idx_contract < len(row) else ""
         raw_name     = str(row[idx_name]).strip()     if idx_name < len(row)     else ""
+        raw_csm      = str(row[idx_csm]).strip()      if idx_csm < len(row)      else ""
 
-        if not raw_id or not raw_contract:
+        if not raw_id or not raw_contract or raw_contract.upper() == "N/A":
             continue
 
         try:
@@ -71,32 +104,89 @@ def get_spreadsheet_clients():
                 "provider_id":      raw_id,
                 "contracted_lives": contracted,
                 "name":             raw_name,
+                "csm":              raw_csm,
             })
         except (ValueError, TypeError):
             print(f"⚠️  Linha ignorada — provider={raw_id}, contrato={raw_contract}")
 
     return clients
 
+# ── Slack — leitura de threads anteriores ─────────────────────────────────────
+
+def get_previous_thread_replies():
+    """
+    Busca a última mensagem principal do bot no canal e retorna
+    as respostas humanas de cada thread, indexadas pelo nome do cliente.
+    """
+    replies_by_client = {}
+    try:
+        result = slack.conversations_history(channel=get_channel_id(), limit=50)
+        messages = result.get("messages", [])
+
+        # Encontra a última mensagem principal do bot com "Volumetria de Clientes"
+        main_msg = next(
+            (m for m in messages if "Volumetria de Clientes" in m.get("text", "")),
+            None
+        )
+        if not main_msg:
+            print("   ↳ Nenhuma mensagem anterior encontrada.")
+            return replies_by_client
+
+        thread_ts = main_msg.get("ts")
+        thread = slack.conversations_replies(channel=get_channel_id(), ts=thread_ts)
+        thread_msgs = thread.get("messages", [])
+
+        bot_id = slack.auth_test()["user_id"]
+
+        for msg in thread_msgs:
+            if msg.get("user") == bot_id:
+                # Extrai o nome do cliente da mensagem do bot (está em negrito *nome*)
+                import re
+                match = re.search(r"\*(.+?)\*", msg.get("text", ""))
+                if not match:
+                    continue
+                client_name = match.group(1)
+
+                # Busca respostas humanas no subthread desta mensagem
+                sub_ts = msg.get("ts")
+                sub = slack.conversations_replies(channel=get_channel_id(), ts=sub_ts)
+                for reply in sub.get("messages", [])[1:]:
+                    if reply.get("user") != bot_id:
+                        author = reply.get("username") or reply.get("user", "CSM")
+                        text   = reply.get("text", "")
+                        replies_by_client[client_name] = {"author": author, "text": text}
+
+    except SlackApiError as e:
+        print(f"⚠️  Erro ao buscar threads anteriores: {e}")
+
+    return replies_by_client
+
+def get_channel_id():
+    """Busca o ID do canal pelo nome."""
+    result = slack.conversations_list(types="private_channel,public_channel", limit=200)
+    for ch in result.get("channels", []):
+        if ch.get("name") == SLACK_CHANNEL:
+            return ch["id"]
+    raise RuntimeError(f"Canal #{SLACK_CHANNEL} não encontrado.")
+
+# ── Metabase ──────────────────────────────────────────────────────────────────
+
 def metabase_headers():
     return {"Content-Type": "application/json", "x-api-key": METABASE_API_KEY}
 
-def fetch_async_result(job_id, max_retries=10, wait=2):
-    for attempt in range(max_retries):
+def fetch_async_result(job_id, max_retries=15, wait=3):
+    for _ in range(max_retries):
         resp = requests.get(
             f"{METABASE_URL}/api/async/{job_id}",
-            headers=metabase_headers(),
-            timeout=30
+            headers=metabase_headers(), timeout=30
         )
         if resp.status_code == 200:
             result = resp.json()
-            status = result.get("status")
-            if status == "completed":
+            if result.get("status") == "completed":
                 return result
-            elif status == "failed":
-                print(f"   ⚠️  Job assíncrono falhou: {result.get('error')}")
+            elif result.get("status") == "failed":
                 return None
         time.sleep(wait)
-    print(f"   ⚠️  Timeout aguardando job assíncrono {job_id}")
     return None
 
 def query_active_patients(provider_id, start_date):
@@ -124,97 +214,349 @@ def query_active_patients(provider_id, start_date):
         result = resp.json()
         job_id = result.get("id")
         if job_id:
-            print(f"   ↳ Query assíncrona, aguardando job {job_id}...")
             result = fetch_async_result(job_id)
             if not result:
                 return None
-        else:
-            result = resp.json()
     elif resp.status_code == 200:
         result = resp.json()
     else:
-        print(f"   ⚠️  Metabase {resp.status_code} para provider {provider_id}: {resp.text[:200]}")
+        print(f"   ⚠️  Metabase {resp.status_code} para provider {provider_id}")
         return None
 
     rows = result.get("data", {}).get("rows", [])
     cols = result.get("data", {}).get("cols", [])
-
     if not rows or not cols:
         return None
 
-    col_names = [c.get("name", "").lower() for c in cols]
-    date_idx   = next((i for i, n in enumerate(col_names) if "date" in n or "month" in n or "mes" in n), 0)
+    col_names  = [c.get("name", "").lower() for c in cols]
+    date_idx   = next((i for i, n in enumerate(col_names) if "month" in n or "date" in n), 0)
     active_idx = next((i for i, n in enumerate(col_names) if "active" in n), 1)
 
-    target_month = start_date[:7]
+    # Retorna dict {YYYY-MM: active_patients}
+    data = {}
     for row in rows:
-        row_date = str(row[date_idx])[:7]
-        if row_date == target_month:
-            try:
-                return int(float(str(row[active_idx]).replace(",", ".")))
-            except (ValueError, TypeError):
-                return None
+        row_month = str(row[date_idx])[:7]
+        try:
+            data[row_month] = int(float(str(row[active_idx]).replace(",", ".")))
+        except (ValueError, TypeError):
+            pass
+    return data
 
-    print(f"   ↳ Mês {target_month} não encontrado, usando última linha disponível")
-    try:
-        return int(float(str(rows[-1][active_idx]).replace(",", ".")))
-    except (ValueError, TypeError):
+# ── Análise dos 3 meses ───────────────────────────────────────────────────────
+
+def classify_pattern(month_rates):
+    """
+    month_rates: lista de taxas dos últimos 3 meses, do mais antigo para o mais recente.
+    """
+    above = [r >= THRESHOLD for r in month_rates]
+    if all(above):
+        return "Recorrente 🔴"
+    elif above[-1] and any(above[:-1]):
+        return "Crescente 🟡"
+    else:
+        return "Pontual 🟠"
+
+# ── Google Drive ──────────────────────────────────────────────────────────────
+
+def get_drive_service():
+    sa_json = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds = Credentials.from_service_account_info(
+        sa_json,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+def find_contas_receber_folder(service):
+    result = service.files().list(
+        q=f"name='{DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        fields="files(id, name)"
+    ).execute()
+    files = result.get("files", [])
+    if not files:
+        raise RuntimeError(f"Pasta '{DRIVE_FOLDER_NAME}' não encontrada no Drive.")
+    return files[0]["id"]
+
+def find_client_folder(service, parent_id, client_name):
+    result = service.files().list(
+        q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        fields="files(id, name)"
+    ).execute()
+    for f in result.get("files", []):
+        if f["name"].lower().strip() == client_name.lower().strip():
+            return f["id"]
+    # Busca parcial se não encontrar exato
+    for f in result.get("files", []):
+        if client_name.lower() in f["name"].lower():
+            return f["id"]
+    return None
+
+def get_latest_contract(service, folder_id):
+    result = service.files().list(
+        q=f"'{folder_id}' in parents and trashed=false",
+        fields="files(id, name, modifiedTime)",
+        orderBy="modifiedTime desc"
+    ).execute()
+    files = result.get("files", [])
+    if not files:
         return None
 
-def fmt(n):
-    return f"{n:,}".replace(",", ".")
+    # Prioridade 1: renovação ou aditivo
+    priority = [
+        f for f in files
+        if any(kw in f["name"].lower() for kw in ["renovação", "renovacao", "aditivo"])
+    ]
+    if priority:
+        return priority[0]
 
-def build_message(alerts, start_date):
+    # Prioridade 2: mais recente
+    return files[0]
+
+def download_file(service, file_id):
+    request = service.files().get_media(fileId=file_id)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    buffer.seek(0)
+    return buffer
+
+def extract_next_tier(pdf_buffer, current_active):
+    """
+    Extrai a próxima faixa de vidas do PDF acima do consumo atual.
+    Retorna dict com vidas, valor_mensal, custo_por_vida ou None.
+    """
+    try:
+        with pdfplumber.open(pdf_buffer) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    for row in table:
+                        if not row:
+                            continue
+                        # Procura linhas com valor numérico de faixa
+                        first_cell = str(row[0] or "").replace(".", "").replace(",", "").strip()
+                        try:
+                            faixa = int(first_cell)
+                        except ValueError:
+                            continue
+
+                        if faixa > current_active:
+                            # Extrai valor por vida (última coluna numérica)
+                            valor_vida = None
+                            valor_mensal = None
+                            for cell in reversed(row):
+                                cell_str = str(cell or "").strip()
+                                if "R$" in cell_str or cell_str.replace(".", "").replace(",", "").replace(" ", "").isdigit():
+                                    cleaned = cell_str.replace("R$", "").replace(".", "").replace(",", ".").strip()
+                                    try:
+                                        val = float(cleaned)
+                                        if valor_vida is None:
+                                            valor_vida = val
+                                        elif valor_mensal is None:
+                                            valor_mensal = val
+                                            break
+                                    except ValueError:
+                                        pass
+
+                            return {
+                                "vidas":         faixa,
+                                "valor_mensal":  valor_mensal,
+                                "custo_por_vida": valor_vida,
+                            }
+    except Exception as e:
+        print(f"   ⚠️  Erro ao extrair faixas do PDF: {e}")
+    return None
+
+# ── Slack — envio ─────────────────────────────────────────────────────────────
+
+def get_csm_mention(csm_name):
+    return CSM_MENTIONS.get(csm_name.lower().strip(), f"@{csm_name}")
+
+def post_main_message(text):
+    result = slack.chat_postMessage(channel=get_channel_id(), text=text, mrkdwn=True)
+    return result["ts"]
+
+def post_thread_reply(channel_id, thread_ts, text):
+    slack.chat_postMessage(
+        channel=channel_id,
+        thread_ts=thread_ts,
+        text=text,
+        mrkdwn=True
+    )
+
+def build_main_message(alerts, start_date):
     month  = get_month_label(start_date)
     header = f":bar_chart: *Volumetria de Clientes — {month}*\nClientes que atingiram *90% ou mais* do contrato de vidas:\n\n"
     if not alerts:
         return header + "✅ Nenhum cliente atingiu o limiar de 90% este mês."
-    lines = []
-    for a in sorted(alerts, key=lambda x: -x["pct"]):
-        emoji = ":red_circle:" if a["pct"] >= 100 else ":large_yellow_circle:"
-        lines.append(
-            f"{emoji} *{a['name']}* (Provider {a['provider_id']}) — {a['pct']}% "
-            f"({fmt(a['active_patients'])} de {fmt(a['contracted_lives'])} vidas)"
-        )
-    return header + "\n".join(lines)
 
-def send_to_slack(message):
-    resp = requests.post(SLACK_WEBHOOK_URL, json={"text": message}, timeout=15)
-    resp.raise_for_status()
+    lines = []
+    for a in sorted(alerts, key=lambda x: -x["pct_current"]):
+        pattern_emoji = "🔴" if a["pct_current"] >= 100 else "🟡"
+        history = " | ".join(
+            f"{get_month_label(m)}: {r:.1f}%"
+            for m, r in a["history"]
+        )
+        lines.append(
+            f"{pattern_emoji} *{a['name']}* (Provider {a['provider_id']}) — {a['pct_current']:.1f}% "
+            f"({fmt(a['active_current'])} de {fmt(a['contracted_lives'])} vidas)\n"
+            f"{history} → Padrão: {a['pattern']}"
+        )
+    return header + "\n\n".join(lines)
+
+def build_thread_message(alert, previous_reply):
+    mention  = get_csm_mention(alert["csm"])
+    name     = alert["name"]
+    pct      = alert["pct_current"]
+    active   = fmt(alert["active_current"])
+    contract = fmt(alert["contracted_lives"])
+
+    lines = [
+        f"{mention} — *{name}* está consumindo {pct:.1f}% do contrato",
+        f"({active} vidas ativas de {contract} contratadas).",
+        ""
+    ]
+
+    if previous_reply:
+        lines += [
+            "💬 *Contexto da semana passada:*",
+            f"{previous_reply['author']} respondeu: \"{previous_reply['text']}\"",
+            ""
+        ]
+
+    tier = alert.get("next_tier")
+    drive_error = alert.get("drive_error")
+
+    if drive_error:
+        lines += [
+            "⚠️ Não encontrei a pasta ou contrato deste cliente em \"Contas a Receber\" no Drive.",
+            ""
+        ]
+    elif tier:
+        valor_mensal  = f"R$ {tier['valor_mensal']:,.2f}/mês".replace(",", ".") if tier.get("valor_mensal") else "—"
+        custo_por_vida = f"R$ {tier['custo_por_vida']:,.2f}".replace(",", ".") if tier.get("custo_por_vida") else "—"
+        lines += [
+            "📄 Analisei o contrato mais recente e há uma próxima faixa prevista:",
+            f"• Próxima faixa: {fmt(tier['vidas'])} vidas",
+            f"• Valor: {valor_mensal}",
+            f"• Custo por vida excedente: {custo_por_vida}",
+            ""
+        ]
+    else:
+        lines += [
+            "📄 Analisei o contrato mais recente e não há tabela de próximas faixas prevista.",
+            ""
+        ]
+
+    lines.append("Qual o próximo passo que deseja seguir? 🙂")
+    return "\n".join(lines)
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    start_date = get_start_date()
-    print(f"📅 Referência: {start_date}")
+    start_date = date.today().replace(day=1).isoformat()
+    months     = get_months(3)
+    print(f"📅 Mês atual: {start_date}")
+    print(f"📅 Últimos 3 meses: {months}")
 
-    print("📋 Lendo planilha...")
+    print("\n📋 Lendo planilha...")
     clients = get_spreadsheet_clients()
     print(f"   {len(clients)} clientes encontrados.")
+
+    print("\n💬 Buscando respostas do thread anterior no Slack...")
+    channel_id       = get_channel_id()
+    previous_replies = get_previous_thread_replies()
+    print(f"   {len(previous_replies)} resposta(s) encontrada(s).")
+
+    print("\n🔍 Consultando Metabase...")
+    drive_service    = get_drive_service()
+    contas_folder_id = find_contas_receber_folder(drive_service)
 
     alerts = []
     for client in clients:
         pid        = client["provider_id"]
         contracted = client["contracted_lives"]
         name       = client["name"]
-        print(f"   {name} — Provider {pid} (contrato: {contracted})...")
-        active = query_active_patients(pid, start_date)
-        if active is None:
+        csm        = client["csm"]
+
+        print(f"   {name} — Provider {pid}...")
+        history_data = query_active_patients(pid, start_date)
+
+        if not history_data:
             print(f"   ↳ Sem dados, pulando.")
             continue
-        pct = round((active / contracted) * 100, 1)
-        print(f"   ↳ Taxa: {active}/{contracted} = {pct}%")
-        if pct >= THRESHOLD:
-            alerts.append({
-                "provider_id":      pid,
-                "active_patients":  active,
-                "contracted_lives": contracted,
-                "pct":              pct,
-                "name":             name,
-            })
+
+        # Extrai taxas dos últimos 3 meses
+        history = []
+        for m in months:
+            month_key = m[:7]
+            active    = history_data.get(month_key, 0)
+            rate      = round((active / contracted) * 100, 1)
+            history.append((m, rate))
+
+        current_month   = start_date[:7]
+        active_current  = history_data.get(current_month, 0)
+        pct_current     = round((active_current / contracted) * 100, 1)
+
+        print(f"   ↳ {active_current}/{contracted} = {pct_current}%")
+
+        if pct_current < THRESHOLD:
+            continue
+
+        pattern = classify_pattern([r for _, r in history])
+
+        # Busca contrato no Drive
+        next_tier   = None
+        drive_error = False
+        print(f"   ↳ Buscando contrato no Drive...")
+        client_folder = find_client_folder(drive_service, contas_folder_id, name)
+        if not client_folder:
+            print(f"   ↳ Pasta não encontrada no Drive.")
+            drive_error = True
+        else:
+            contract_file = get_latest_contract(drive_service, client_folder)
+            if not contract_file:
+                print(f"   ↳ Nenhum documento encontrado na pasta.")
+                drive_error = True
+            else:
+                print(f"   ↳ Analisando: {contract_file['name']}")
+                pdf_buffer = download_file(drive_service, contract_file["id"])
+                next_tier  = extract_next_tier(pdf_buffer, active_current)
+                if next_tier:
+                    print(f"   ↳ Próxima faixa: {next_tier['vidas']} vidas")
+                else:
+                    print(f"   ↳ Sem tabela de faixas no contrato.")
+
+        alerts.append({
+            "provider_id":      pid,
+            "name":             name,
+            "csm":              csm,
+            "contracted_lives": contracted,
+            "active_current":   active_current,
+            "pct_current":      pct_current,
+            "history":          history,
+            "pattern":          pattern,
+            "next_tier":        next_tier,
+            "drive_error":      drive_error,
+        })
 
     print(f"\n🚨 {len(alerts)} cliente(s) acima de {THRESHOLD}%.")
-    print("📤 Enviando para o Slack...")
-    send_to_slack(build_message(alerts, start_date))
-    print("✅ Mensagem enviada com sucesso.")
+
+    print("📤 Enviando mensagem principal no Slack...")
+    main_text = build_main_message(alerts, start_date)
+    main_ts   = post_main_message(main_text)
+    print(f"   ✅ Mensagem enviada (ts: {main_ts})")
+
+    if alerts:
+        print("📤 Enviando threads por cliente...")
+        for alert in alerts:
+            previous = previous_replies.get(alert["name"])
+            thread_text = build_thread_message(alert, previous)
+            post_thread_reply(channel_id, main_ts, thread_text)
+            print(f"   ✅ Thread: {alert['name']}")
+
+    print("\n✅ Concluído.")
 
 if __name__ == "__main__":
     main()
