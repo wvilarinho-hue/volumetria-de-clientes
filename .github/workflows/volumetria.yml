@@ -2,7 +2,7 @@ name: Volumetria de Clientes
 
 on:
   schedule:
-    - cron: "0 11 * * 1"
+    - cron: "0 11 * * 1"  # toda segunda às 08h Brasília
   workflow_dispatch:
 
 jobs:
@@ -33,5 +33,5 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           METABASE_URL:                ${{ secrets.METABASE_URL }}
           METABASE_API_KEY:            ${{ secrets.METABASE_API_KEY }}
-          SLACK_WEBHOOK_URL:           ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN }}
         run: python main.py
