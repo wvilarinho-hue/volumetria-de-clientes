@@ -27,7 +27,7 @@ CARD_ID             = 9263
 PROVIDER_PARAM_ID   = "b46cc8b5"
 START_DATE_PARAM_ID = "1c0cfe6c"
 THRESHOLD           = 90.0
-DRIVE_FOLDER_NAME   = "Contas a Receber"
+DRIVE_FOLDER_ID     = "1A0gNawgeF3JQfLllTiZFXyT6U-drFz1K"
 
 CSM_MENTIONS = {
     "weslley vilarinho":  "@Weslley Vilarinho",
@@ -258,16 +258,6 @@ def get_drive_service():
     )
     return build("drive", "v3", credentials=creds)
 
-def find_contas_receber_folder(service):
-    result = service.files().list(
-        q=f"name='{DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields="files(id, name)"
-    ).execute()
-    files = result.get("files", [])
-    if not files:
-        raise RuntimeError(f"Pasta '{DRIVE_FOLDER_NAME}' não encontrada no Drive.")
-    return files[0]["id"]
-
 def find_client_folder(service, parent_id, client_name):
     result = service.files().list(
         q=f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
@@ -463,7 +453,7 @@ def main():
 
     print("\n🔍 Consultando Metabase...")
     drive_service    = get_drive_service()
-    contas_folder_id = find_contas_receber_folder(drive_service)
+    contas_folder_id = DRIVE_FOLDER_ID
 
     alerts = []
     for client in clients:
