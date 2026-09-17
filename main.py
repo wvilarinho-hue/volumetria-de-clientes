@@ -18,7 +18,7 @@ METABASE_API_KEY    = os.environ["METABASE_API_KEY"]
 SLACK_BOT_TOKEN     = os.environ["SLACK_BOT_TOKEN"]
 SLACK_CHANNEL_ID    = "C0B44KY9NGZ"
 METABASE_CARD_ID    = 8623
-THRESHOLD           = 70.0
+THRESHOLD           = 50.0
 
 CSM_MENTIONS = {
     "weslley vilarinho":                       "<@U098G010EJV>",
@@ -27,11 +27,15 @@ CSM_MENTIONS = {
 }
 
 # Índices das colunas no card 8623 (conforme debug)
-COL_CLIENTE           = 0
-COL_VIDAS_ATIVAS      = 4   # Vidas Ativas M-2
-COL_VIDAS_MONITORADAS = 6   # Vidas Monitoradas M-2
-COL_CHAT              = 8   # Sessoes Chat M-2
-COL_AGENTE            = 16  # Atendimentos Agente M-2
+COL_CLIENTE               = 0
+COL_VIDAS_ATIVAS          = 4   # Vidas Ativas M-2
+COL_VIDAS_ATIVAS_M1       = 5   # Vidas Ativas M-1
+COL_VIDAS_MONITORADAS     = 6   # Vidas Monitoradas M-2
+COL_VIDAS_MONITORADAS_M1  = 7   # Vidas Monitoradas M-1
+COL_CHAT                  = 8   # Sessoes Chat M-2
+COL_CHAT_M1               = 9   # Sessoes Chat M-1
+COL_AGENTE                = 16  # Atendimentos Agente M-2
+COL_AGENTE_M1             = 17  # Atendimentos Agente M-1
 
 slack = WebClient(token=SLACK_BOT_TOKEN)
 
@@ -210,11 +214,15 @@ def query_metabase_all_clients():
                 return None
 
         data[normalize(nome)] = {
-            "nome_original":    nome,
-            "vidas_ativas":     safe_int(COL_VIDAS_ATIVAS),
-            "vidas_monitoradas": safe_int(COL_VIDAS_MONITORADAS),
-            "chat":             safe_int(COL_CHAT),
-            "agente":           safe_int(COL_AGENTE),
+            "nome_original":      nome,
+            "vidas_ativas":       safe_int(COL_VIDAS_ATIVAS),
+            "vidas_ativas_m1":    safe_int(COL_VIDAS_ATIVAS_M1),
+            "vidas_monitoradas":  safe_int(COL_VIDAS_MONITORADAS),
+            "vidas_monit_m1":     safe_int(COL_VIDAS_MONITORADAS_M1),
+            "chat":               safe_int(COL_CHAT),
+            "chat_m1":            safe_int(COL_CHAT_M1),
+            "agente":             safe_int(COL_AGENTE),
+            "agente_m1":          safe_int(COL_AGENTE_M1),
         }
 
     return data
@@ -288,9 +296,10 @@ def build_main_message(alerts, week_label):
     for a in sorted(alerts, key=lambda x: -x["max_pct"]):
         metrics_str = []
         for m in a["metrics"]:
-            bar = "⚠️" if m["pct"] >= 90 else "🟡"
+            bar   = "🔴" if m["pct"] >= 90 else "🟡"
+            trend = m.get("trend", "")
             metrics_str.append(
-                f"    {bar} *{m['label']}*: {m['pct']:.1f}% "
+                f"    {bar} *{m['label']}*: {m['pct']:.1f}%{trend} "
                 f"({fmt(m['consumed'])} de {fmt(m['contracted'])})"
             )
         lines.append(
@@ -314,9 +323,11 @@ def build_thread_message(alert, previous_reply):
 
     lines.append("📊 *Consumo atual:*")
     for m in alert["metrics"]:
-        bar = "⚠️" if m["pct"] >= 90 else "🟡"
+        bar   = "🔴" if m["pct"] >= 90 else "🟡"
+        trend = m.get("trend", "")
+        prev  = f" (mês anterior: {m['pct_prev']:.1f}%)" if m.get("pct_prev") is not None else ""
         lines.append(
-            f"  {bar} {m['label']}: {m['pct']:.1f}% "
+            f"  {bar} {m['label']}: {m['pct']:.1f}%{trend}{prev} "
             f"({fmt(m['consumed'])} de {fmt(m['contracted'])})"
         )
 
@@ -365,53 +376,50 @@ def main():
 
         metrics_alert = []
 
+        def calc_metric(label, consumed_now, consumed_prev, contracted):
+            if consumed_now is None or not contracted:
+                return None
+            pct_now  = round((consumed_now / contracted) * 100, 1)
+            pct_prev = round((consumed_prev / contracted) * 100, 1) if consumed_prev is not None else None
+            delta    = round(pct_now - pct_prev, 1) if pct_prev is not None else None
+            if delta is None:
+                trend = ""
+            elif delta > 2:
+                trend = f" ↑ +{delta}pp"
+            elif delta < -2:
+                trend = f" ↓ {delta}pp"
+            else:
+                trend = f" → {delta:+.1f}pp"
+            print(f"   {nome} | {label}: {consumed_now}/{contracted} = {pct_now}%{trend}")
+            if pct_now >= THRESHOLD:
+                return {
+                    "label":      label,
+                    "consumed":   consumed_now,
+                    "contracted": contracted,
+                    "pct":        pct_now,
+                    "pct_prev":   pct_prev,
+                    "delta":      delta,
+                    "trend":      trend,
+                }
+            return None
+
         # Vidas
         if client["vidas_tot"]:
             if "navegadas" in client["regra"]:
-                consumed = mb["vidas_monitoradas"]
-                label    = "Vidas navegadas"
+                m = calc_metric("Vidas navegadas", mb["vidas_monitoradas"], mb["vidas_monit_m1"], client["vidas_tot"])
             else:
-                consumed = mb["vidas_ativas"]
-                label    = "Vidas ativas"
-
-            if consumed is not None:
-                pct = round((consumed / client["vidas_tot"]) * 100, 1)
-                print(f"   {nome} | {label}: {consumed}/{client['vidas_tot']} = {pct}%")
-                if pct >= THRESHOLD:
-                    metrics_alert.append({
-                        "label":      label,
-                        "consumed":   consumed,
-                        "contracted": client["vidas_tot"],
-                        "pct":        pct,
-                    })
+                m = calc_metric("Vidas ativas", mb["vidas_ativas"], mb["vidas_ativas_m1"], client["vidas_tot"])
+            if m: metrics_alert.append(m)
 
         # Conversas
         if client["franq_conv"]:
-            consumed = mb["chat"]
-            if consumed is not None:
-                pct = round((consumed / client["franq_conv"]) * 100, 1)
-                print(f"   {nome} | Conversas: {consumed}/{client['franq_conv']} = {pct}%")
-                if pct >= THRESHOLD:
-                    metrics_alert.append({
-                        "label":      "Conversas",
-                        "consumed":   consumed,
-                        "contracted": client["franq_conv"],
-                        "pct":        pct,
-                    })
+            m = calc_metric("Conversas", mb["chat"], mb["chat_m1"], client["franq_conv"])
+            if m: metrics_alert.append(m)
 
         # Agente
         if client["franq_age"]:
-            consumed = mb["agente"]
-            if consumed is not None:
-                pct = round((consumed / client["franq_age"]) * 100, 1)
-                print(f"   {nome} | Agente: {consumed}/{client['franq_age']} = {pct}%")
-                if pct >= THRESHOLD:
-                    metrics_alert.append({
-                        "label":      "Atendimentos Agente",
-                        "consumed":   consumed,
-                        "contracted": client["franq_age"],
-                        "pct":        pct,
-                    })
+            m = calc_metric("Atendimentos Agente", mb["agente"], mb["agente_m1"], client["franq_age"])
+            if m: metrics_alert.append(m)
 
         if metrics_alert:
             max_pct = max(m["pct"] for m in metrics_alert)
