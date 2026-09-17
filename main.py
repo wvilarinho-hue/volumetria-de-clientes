@@ -85,15 +85,21 @@ def get_clients_from_spreadsheet():
     if not all_values:
         return []
 
-    # Encontra a linha de cabeçalho (busca por "Clientes")
+    # Encontra a linha de cabeçalho onde "Clientes" está na primeira coluna
+    # (ignora seções onde "Clientes" aparece no meio da linha)
     header_row_idx = None
     for i, row in enumerate(all_values):
-        if any("clientes" in str(cell).lower() for cell in row):
+        if not row:
+            continue
+        first_cells = [str(c).strip().lower() for c in row[:3]]
+        if "clientes" in first_cells:
             header_row_idx = i
             break
 
     if header_row_idx is None:
-        raise RuntimeError("Cabeçalho 'Clientes' não encontrado na planilha.")
+        raise RuntimeError("Cabeçalho 'Clientes' não encontrado na primeira coluna da planilha.")
+
+    print(f"   Cabeçalho encontrado na linha {header_row_idx + 1}.")
 
     headers = [str(h).strip() for h in all_values[header_row_idx]]
     rows    = all_values[header_row_idx + 1:]
