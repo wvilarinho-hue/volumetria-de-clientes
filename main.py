@@ -298,28 +298,39 @@ def get_previous_thread_replies():
     return replies
 
 def build_main_message(alerts, week_label):
-    header = (
-        f":bar_chart: *Volumetria de Clientes — semana de {week_label}*\n"
-        f"Clientes com consumo ≥ 70% em pelo menos uma métrica:\n\n"
-    )
+    today = week_label  # ex: 17/09/2026 → pega só dia/mês
+    short_date = "/".join(week_label.split("/")[:2])
+
+    header = f":bar_chart: *Volumetria · {short_date} · >50%*\n\n"
+
     if not alerts:
-        return header + "✅ Nenhum cliente atingiu o limiar de 70% esta semana."
+        return header + "✅ Nenhum cliente acima de 50% esta semana."
 
     lines = []
     for a in sorted(alerts, key=lambda x: -x["max_pct"]):
-        metrics_str = []
-        for m in a["metrics"]:
-            bar   = "🔴" if m["pct"] >= 90 else "🟡"
-            trend = m.get("trend", "")
-            metrics_str.append(
-                f"    {bar} *{m['label']}*: {m['pct']:.1f}%{trend} "
-                f"({fmt(m['consumed'])} de {fmt(m['contracted'])})"
-            )
-        lines.append(
-            f"*{a['nome']}* — CSM: {a['csm']}\n" + "\n".join(metrics_str)
-        )
+        emoji = "🔴" if a["max_pct"] >= 90 else "🟡"
 
-    return header + "\n\n".join(lines)
+        label_map = {
+            "Vidas ativas":        "vidas",
+            "Vidas navegadas":     "vidas",
+            "Conversas":           "conversas",
+            "Atendimentos Agente": "agente",
+        }
+
+        metrics_parts = []
+        for m in a["metrics"]:
+            short_label = label_map.get(m["label"], m["label"].lower())
+            trend = m.get("trend", "").strip()
+            # Extrai só a seta: ↑, ↓ ou →
+            arrow = ""
+            if "↑" in trend: arrow = " ↑"
+            elif "↓" in trend: arrow = " ↓"
+            elif "→" in trend: arrow = " →"
+            metrics_parts.append(f"{m['pct']:.0f}%{arrow} {short_label}")
+
+        lines.append(f"{emoji} *{a['nome']}* — {' · '.join(metrics_parts)}")
+
+    return header + "\n".join(lines)
 
 def build_thread_message(alert, previous_reply):
     mention = get_csm_mention(alert["csm"])
