@@ -1,6 +1,5 @@
 gspread==6.1.2
 google-auth==2.29.0
 requests==2.31.0
-python-dateutil==2.9.0
 slack-sdk==3.27.1
 python-dotenv==1.0.1
