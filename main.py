@@ -78,38 +78,35 @@ def get_clients_from_spreadsheet():
     )
     gc = gspread.authorize(creds)
 
-    # Lê a aba principal (primeira aba com dados de clientes)
-    sheet = gc.open_by_key(NEW_SPREADSHEET_ID).get_worksheet(0)
-    all_values = sheet.get_all_values()
+    # Busca a aba que contém "Clientes" na primeira coluna
+    spreadsheet = gc.open_by_key(NEW_SPREADSHEET_ID)
+    all_values  = None
+    for ws in spreadsheet.worksheets():
+        vals = ws.get_all_values()
+        for row in vals:
+            if row and str(row[0]).strip().lower() == "clientes":
+                print(f"   Aba encontrada: '{ws.title}'")
+                all_values = vals
+                break
+        if all_values is not None:
+            break
+
+    if all_values is None:
+        raise RuntimeError("Nenhuma aba com 'Clientes' na primeira coluna encontrada.")
 
     if not all_values:
         return []
 
-    # Debug: mostra primeiras linhas para entender estrutura
-    print("   DEBUG — primeiras 15 linhas (primeiras 5 colunas):")
-    for i, row in enumerate(all_values[:15]):
-        preview = [str(c).strip()[:20] for c in row[:5]]
-        print(f"   [{i}] {preview}")
-
-    # Encontra a linha de cabeçalho onde "Clientes" está nas primeiras 5 colunas
+    # Encontra a linha de cabeçalho onde "Clientes" está na primeira coluna
     header_row_idx = None
     for i, row in enumerate(all_values):
-        if not row:
-            continue
-        first_cells = [str(c).strip().lower() for c in row[:5]]
-        if "clientes" in first_cells:
-            col_pos = next(j for j, c in enumerate(first_cells) if c == "clientes")
-            print(f"   Cabeçalho encontrado na linha {i + 1}, coluna {col_pos}.")
+        if row and str(row[0]).strip().lower() == "clientes":
             header_row_idx = i
+            print(f"   Cabeçalho encontrado na linha {i + 1}.")
             break
 
     if header_row_idx is None:
-        # Busca em qualquer posição para debug
-        for i, row in enumerate(all_values):
-            for j, cell in enumerate(row):
-                if str(cell).strip().lower() == "clientes":
-                    print(f"   'Clientes' encontrado na linha {i+1}, coluna {j} — fora do esperado.")
-        raise RuntimeError("Cabeçalho 'Clientes' não encontrado nas primeiras 5 colunas.")
+        raise RuntimeError("Cabeçalho 'Clientes' não encontrado na primeira coluna.")
 
     headers = [str(h).strip() for h in all_values[header_row_idx]]
     rows    = all_values[header_row_idx + 1:]
