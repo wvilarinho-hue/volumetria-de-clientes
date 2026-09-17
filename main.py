@@ -297,10 +297,25 @@ def get_previous_thread_replies():
         print(f"⚠️  Erro ao buscar threads: {e}")
     return replies
 
-def build_main_message(alerts, week_label):
-    today = week_label  # ex: 17/09/2026 → pega só dia/mês
-    short_date = "/".join(week_label.split("/")[:2])
+LABEL_MAP = {
+    "Vidas ativas":        "vidas ativas",
+    "Vidas navegadas":     "vidas navegadas",
+    "Conversas":           "franquia de conversas",
+    "Atendimentos Agente": "franquia de atendimentos",
+}
 
+def metric_line(m):
+    pct   = m["pct"]
+    cons  = fmt(m["consumed"])
+    cont  = fmt(m["contracted"])
+    label = LABEL_MAP.get(m["label"], m["label"].lower())
+    trend = m.get("trend", "").strip()
+    arrow = " ↑" if "↑" in trend else (" ↓" if "↓" in trend else " →")
+    emoji = "🔴" if pct >= 90 else "🟡"
+    return f"{emoji} consumindo *{pct:.0f}%*{arrow} da {label} ({cons} de {cont})"
+
+def build_main_message(alerts, week_label):
+    short_date = "/".join(week_label.split("/")[:2])
     header = f":bar_chart: *Volumetria · {short_date} · >50%*\n\n"
 
     if not alerts:
@@ -308,35 +323,18 @@ def build_main_message(alerts, week_label):
 
     lines = []
     for a in sorted(alerts, key=lambda x: -x["max_pct"]):
-        emoji = "🔴" if a["max_pct"] >= 90 else "🟡"
-
-        label_map = {
-            "Vidas ativas":        "vidas",
-            "Vidas navegadas":     "vidas",
-            "Conversas":           "conversas",
-            "Atendimentos Agente": "agente",
-        }
-
-        metrics_parts = []
+        client_lines = [f"*{a['nome']}* ({a['csm']})"]
         for m in a["metrics"]:
-            short_label = label_map.get(m["label"], m["label"].lower())
-            trend = m.get("trend", "").strip()
-            # Extrai só a seta: ↑, ↓ ou →
-            arrow = ""
-            if "↑" in trend: arrow = " ↑"
-            elif "↓" in trend: arrow = " ↓"
-            elif "→" in trend: arrow = " →"
-            metrics_parts.append(f"{m['pct']:.0f}%{arrow} {short_label}")
+            client_lines.append(f"  {metric_line(m)}")
+        lines.append("\n".join(client_lines))
 
-        lines.append(f"{emoji} *{a['nome']}* — {' · '.join(metrics_parts)}")
-
-    return header + "\n".join(lines)
+    return header + "\n\n".join(lines)
 
 def build_thread_message(alert, previous_reply):
     mention = get_csm_mention(alert["csm"])
     nome    = alert["nome"]
 
-    lines = [f"{mention} — *{nome}*", ""]
+    lines = [f"*{nome}* — {alert['csm']}", ""]
 
     if previous_reply:
         lines += [
