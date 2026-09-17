@@ -85,21 +85,31 @@ def get_clients_from_spreadsheet():
     if not all_values:
         return []
 
-    # Encontra a linha de cabeçalho onde "Clientes" está na primeira coluna
-    # (ignora seções onde "Clientes" aparece no meio da linha)
+    # Debug: mostra primeiras linhas para entender estrutura
+    print("   DEBUG — primeiras 15 linhas (primeiras 5 colunas):")
+    for i, row in enumerate(all_values[:15]):
+        preview = [str(c).strip()[:20] for c in row[:5]]
+        print(f"   [{i}] {preview}")
+
+    # Encontra a linha de cabeçalho onde "Clientes" está nas primeiras 5 colunas
     header_row_idx = None
     for i, row in enumerate(all_values):
         if not row:
             continue
-        first_cells = [str(c).strip().lower() for c in row[:3]]
+        first_cells = [str(c).strip().lower() for c in row[:5]]
         if "clientes" in first_cells:
+            col_pos = next(j for j, c in enumerate(first_cells) if c == "clientes")
+            print(f"   Cabeçalho encontrado na linha {i + 1}, coluna {col_pos}.")
             header_row_idx = i
             break
 
     if header_row_idx is None:
-        raise RuntimeError("Cabeçalho 'Clientes' não encontrado na primeira coluna da planilha.")
-
-    print(f"   Cabeçalho encontrado na linha {header_row_idx + 1}.")
+        # Busca em qualquer posição para debug
+        for i, row in enumerate(all_values):
+            for j, cell in enumerate(row):
+                if str(cell).strip().lower() == "clientes":
+                    print(f"   'Clientes' encontrado na linha {i+1}, coluna {j} — fora do esperado.")
+        raise RuntimeError("Cabeçalho 'Clientes' não encontrado nas primeiras 5 colunas.")
 
     headers = [str(h).strip() for h in all_values[header_row_idx]]
     rows    = all_values[header_row_idx + 1:]
